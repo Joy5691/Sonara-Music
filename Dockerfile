@@ -5,7 +5,6 @@ WORKDIR /app
 # Install ffmpeg for yt-dlp audio extraction
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
-COPY ytmusicapi-main ytmusicapi-main
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
