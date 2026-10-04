@@ -221,7 +221,7 @@ def extract_stream_url_internal(video_id: str):
             "noplaylist": True,
             "skip_download": True,
             "nocheckcertificate": True,
-            "lazy_playlist": True,
+            "lazy_playlist": True, "extractor_args": {"youtube": {"client": ["mweb", "android"]}},
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Passing just the video ID is sometimes faster than full music URL parsing
@@ -338,3 +338,4 @@ def get_search_suggestions(q: str = Query(...)):
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
+
