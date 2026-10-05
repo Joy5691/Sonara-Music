@@ -4,3 +4,5 @@ ytmusicapi
 yt-dlp>=2024.1.0
 python-dotenv>=1.0.0
 httpx>=0.25.0
+
+pytubefix>=11.0.0

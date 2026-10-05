@@ -212,6 +212,18 @@ def extract_stream_url_internal(video_id: str):
         if now - entry['timestamp'] < (3600 * 4):
             return entry['url']
 
+    # 1. Try pytubefix first (bypasses many bot protections automatically)
+    try:
+        from pytubefix import YouTube
+        yt = YouTube(f"https://www.youtube.com/watch?v={video_id}", client="WEB")
+        stream = yt.streams.get_audio_only()
+        if stream and stream.url:
+            STREAM_URL_CACHE[video_id] = {'url': stream.url, 'timestamp': now}
+            return stream.url
+    except Exception as e:
+        print(f"pytubefix failed: {e}")
+
+    # 2. Fallback to yt-dlp
     try:
         ydl_opts = {
             "format": "bestaudio/best",
@@ -221,10 +233,10 @@ def extract_stream_url_internal(video_id: str):
             "noplaylist": True,
             "skip_download": True,
             "nocheckcertificate": True,
-            "lazy_playlist": True, "extractor_args": {"youtube": {"client": ["mweb", "android"]}},
+            "lazy_playlist": True, 
+            "extractor_args": {"youtube": {"client": ["mweb", "android"]}},
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Passing just the video ID is sometimes faster than full music URL parsing
             info = ydl.extract_info(video_id, download=False)
             audio_url = None
             if info and "formats" in info:
@@ -239,12 +251,10 @@ def extract_stream_url_internal(video_id: str):
                 audio_url = info.get("url")
             
             if audio_url:
-                STREAM_URL_CACHE[video_id] = {
-                    'url': audio_url,
-                    'timestamp': now
-                }
+                STREAM_URL_CACHE[video_id] = {'url': audio_url, 'timestamp': now}
             return audio_url
     except Exception as e:
+        print(f"yt-dlp failed: {e}")
         return None
 
 @app.get("/api/stream/{video_id}")
@@ -338,4 +348,5 @@ def get_search_suggestions(q: str = Query(...)):
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
+
 
