@@ -1,15 +1,15 @@
 """
-Sonara Music ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Python API Server
+Sonara Music Python API Server
 Wraps ytmusicapi to provide search, browse, charts, and audio streaming
 """
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, RedirectResponse
-import yt_dlp
+from fastapi.responses import RedirectResponse
 from ytmusicapi import YTMusic
 import uvicorn
 import os
+import time
 
 app = FastAPI(
     title="Sonara Music API",
@@ -17,7 +17,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â allow web frontend
+# CORS - allow web frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -160,102 +160,65 @@ def get_watch_playlist(video_id: str, limit: int = Query(25, ge=1, le=50)):
 
 
 # ============================================
-# AUDIO STREAM URL (via yt-dlp)
+# AUDIO STREAM URL (via pytubefix)
 # ============================================
-from fastapi import Request
-import httpx
+STREAM_URL_CACHE = {}
+
+
+def extract_audio_url(video_id: str):
+    """
+    Use pytubefix to extract a direct audio stream URL.
+    pytubefix bundles its own Node.js runtime and can decrypt
+    YouTube's signature cipher, which works from any IP.
+    """
+    now = time.time()
+
+    # Check cache first (URLs expire after ~6 hours, we cache for 4)
+    if video_id in STREAM_URL_CACHE:
+        entry = STREAM_URL_CACHE[video_id]
+        if now - entry["timestamp"] < (3600 * 4):
+            return entry["url"]
+
+    # Try multiple pytubefix clients in order of reliability
+    from pytubefix import YouTube
+
+    for client in ["WEB", "WEB_MUSIC", "MWEB", "ANDROID_MUSIC"]:
+        try:
+            yt = YouTube(
+                f"https://www.youtube.com/watch?v={video_id}",
+                client=client,
+            )
+            stream = yt.streams.get_audio_only()
+            if stream and stream.url:
+                STREAM_URL_CACHE[video_id] = {"url": stream.url, "timestamp": now}
+                return stream.url
+        except Exception as e:
+            print(f"pytubefix client={client} failed for {video_id}: {e}")
+            continue
+
+    return None
+
+
+@app.get("/api/stream_info/{video_id}")
+def get_stream_info(video_id: str):
+    """
+    Returns the direct audio URL as JSON.
+    The frontend plays this URL directly in the browser.
+    """
+    audio_url = extract_audio_url(video_id)
+    if not audio_url:
+        raise HTTPException(status_code=404, detail="No audio stream found")
+    return {"success": True, "audioUrl": audio_url}
+
 
 @app.get("/api/stream_direct/{video_id}")
 async def get_stream_direct(video_id: str, request: Request):
-    url = extract_stream_url_internal(video_id)
-    if not url:
+    """Redirect to direct audio URL (backward compat)."""
+    audio_url = extract_audio_url(video_id)
+    if not audio_url:
         raise HTTPException(status_code=404, detail="No audio stream found")
-    
-    headers = {}
-    if "range" in request.headers:
-        headers["range"] = request.headers["range"]
-        
-    client = httpx.AsyncClient()
-    req = client.build_request("GET", url, headers=headers)
-    r = await client.send(req, stream=True)
-    
-    response_headers = {}
-    if "accept-ranges" in r.headers:
-        response_headers["Accept-Ranges"] = r.headers["accept-ranges"]
-    if "content-length" in r.headers:
-        response_headers["Content-Length"] = str(r.headers["content-length"])
-    if "content-range" in r.headers:
-        response_headers["Content-Range"] = r.headers["content-range"]
+    return RedirectResponse(url=audio_url, status_code=302)
 
-    async def generate():
-        try:
-            async for chunk in r.aiter_bytes():
-                yield chunk
-        finally:
-            await client.aclose()
-
-    return StreamingResponse(
-        generate(),
-        status_code=r.status_code,
-        media_type=r.headers.get("content-type", "audio/mp4"),
-        headers=response_headers
-    )
-
-import time
-STREAM_URL_CACHE = {}
-
-def extract_stream_url_internal(video_id: str):
-    now = time.time()
-    # Cache for 4 hours (Google Video URLs typically expire in 6 hours)
-    if video_id in STREAM_URL_CACHE:
-        entry = STREAM_URL_CACHE[video_id]
-        if now - entry['timestamp'] < (3600 * 4):
-            return entry['url']
-
-    # 1. Try pytubefix first (bypasses many bot protections automatically)
-    try:
-        from pytubefix import YouTube
-        yt = YouTube(f"https://www.youtube.com/watch?v={video_id}", client="WEB")
-        stream = yt.streams.get_audio_only()
-        if stream and stream.url:
-            STREAM_URL_CACHE[video_id] = {'url': stream.url, 'timestamp': now}
-            return stream.url
-    except Exception as e:
-        print(f"pytubefix failed: {e}")
-
-    # 2. Fallback to yt-dlp
-    try:
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": False,
-            "noplaylist": True,
-            "skip_download": True,
-            "nocheckcertificate": True,
-            "lazy_playlist": True, 
-            "extractor_args": {"youtube": {"client": ["mweb", "android"]}},
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_id, download=False)
-            audio_url = None
-            if info and "formats" in info:
-                audio_formats = [
-                    f for f in info["formats"]
-                    if f.get("acodec") != "none" and f.get("vcodec") in ("none", None)
-                ]
-                if audio_formats:
-                    audio_formats.sort(key=lambda f: f.get("abr", 0) or 0, reverse=True)
-                    audio_url = audio_formats[0]["url"]
-            if not audio_url and info:
-                audio_url = info.get("url")
-            
-            if audio_url:
-                STREAM_URL_CACHE[video_id] = {'url': audio_url, 'timestamp': now}
-            return audio_url
-    except Exception as e:
-        print(f"yt-dlp failed: {e}")
-        return None
 
 @app.get("/api/stream/{video_id}")
 def get_stream_url(video_id: str):
@@ -263,50 +226,14 @@ def get_stream_url(video_id: str):
     Extract the best audio stream URL for a YouTube video.
     Returns a direct audio URL the frontend can play.
     """
-    try:
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": False,
-            "noplaylist": True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(
-                f"https://music.youtube.com/watch?v={video_id}", download=False
-            )
-            # Find the best audio-only format
-            audio_url = None
-            if info and "formats" in info:
-                audio_formats = [
-                    f for f in info["formats"]
-                    if f.get("acodec") != "none" and f.get("vcodec") in ("none", None)
-                ]
-                if audio_formats:
-                    # Sort by audio bitrate descending
-                    audio_formats.sort(key=lambda f: f.get("abr", 0) or 0, reverse=True)
-                    audio_url = audio_formats[0]["url"]
-
-            if not audio_url and info:
-                # Fallback to the url field
-                audio_url = info.get("url")
-
-            if not audio_url:
-                raise HTTPException(status_code=404, detail="No audio stream found")
-
-            return {
-                "success": True,
-                "videoId": video_id,
-                "title": info.get("title", ""),
-                "artist": info.get("artist") or info.get("uploader", ""),
-                "duration": info.get("duration", 0),
-                "thumbnail": info.get("thumbnail", ""),
-                "audioUrl": audio_url,
-            }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Stream extraction failed: {str(e)}")
+    audio_url = extract_audio_url(video_id)
+    if not audio_url:
+        raise HTTPException(status_code=404, detail="No audio stream found")
+    return {
+        "success": True,
+        "videoId": video_id,
+        "audioUrl": audio_url,
+    }
 
 
 # ============================================
@@ -348,5 +275,3 @@ def get_search_suggestions(q: str = Query(...)):
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
-
-
